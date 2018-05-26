@@ -16,7 +16,7 @@ import cPickle
 
 
 #---------------------------------------------------------------
-def ENVI_raster_binary_to_2d_array(file_name, gauge):
+def ENVI_raster_binary_to_2d_array(file_name):
     """
     This function transforms a raster into a numpy array.
 
@@ -31,8 +31,6 @@ def ENVI_raster_binary_to_2d_array(file_name, gauge):
     Source: http://chris35wills.github.io/python-gdal-raster-io/
     """
 
-
-    print 'Opening %s' % (gauge)
 
     driver = gdal.GetDriverByName('ENVI')
 
@@ -269,9 +267,6 @@ def define_search_space (DEM, Slope, Nodata_value, opt):
     hist=hist/sum(hist); bins=bins[:-1]
 
 
-
-
-
     #Let's make a figure to check
     fig=plt.figure(1, facecolor='White',figsize=[10,10])
     ax1 = plt.subplot2grid((1,1),(0,0),colspan=1, rowspan=1)
@@ -298,7 +293,7 @@ def define_search_space (DEM, Slope, Nodata_value, opt):
 
 
 
-    plt.savefig('Elevation_PDF.png' )
+    plt.savefig('Test_figs/Elevation_PDF.png' )
 
 
     Inflexion_point = 0
@@ -329,7 +324,7 @@ def define_search_space (DEM, Slope, Nodata_value, opt):
         print
         print " ... Your search space is empty! Are you sure there's a marsh platform here?"
         print
-        STOP
+        quit()
 
     return Search_space, Crossover, bins, hist, Inflexion_point
 

@@ -27,8 +27,8 @@ from LSDMarshPlatform_functions import ENVI_raster_binary_to_2d_array
 from LSDMarshPlatform_functions import ENVI_raster_binary_from_2d_array
 
 # The main functions for the marsh identification
-from LSDMarshPlatform_functions import MARSH_ID
-from LSDMarshPlatform_functions import Confusion
+from LSDMarshPlatform_functions import *
+from LSDMarshPlatform_classes import *
 
 # Retained directories from Guillaume
 # "//csce.datastore.ed.ac.uk/csce/geos/users/s1563094/Software/LSDTopoTools/LSDTopoTools_MarshPlatform/Example_data/"
@@ -68,17 +68,49 @@ def MarshID(Input_dir =  "/LSDTopoTools/LSDTopoTools_MarshPlatform/Example_data/
 
         # NB: When loading input data, please make sure the naming convention shown here is respected.
         print(" Loading DEM")
-        DEM, post_DEM, envidata_DEM =  ENVI_raster_binary_to_2d_array (Input_dir+"%s_DEM_clip.bil" % (site), site)
+        DEM, post_DEM, envidata_DEM =  ENVI_raster_binary_to_2d_array (Input_dir+"%s_DEM_clip.bil" % (site))
+
+        #Make a proper object for the DEM
+        DEM_object = Land_surface(DEM.shape[0], DEM.shape[1])
+        DEM_object = DEM_object.set_attribute (DEM, Nodata_value, DEM, Nodata_value, classification = False)
+
+
         print " Loading Slopes"
         # check to get the correct slope raster
         slope_fname = site+"_slope_clip.bil"
         if not os.path.isfile(Input_dir+slope_fname):
             slope_fname = site+"_SLOPE_clip.bil"
         Slope, post_Slope, envidata_Slope =  ENVI_raster_binary_to_2d_array (Input_dir+slope_fname, site)
+        #Make a proper object for the DEM
+        Slope_object = Land_surface(DEM.shape[0], DEM.shape[1])
+        Slope_object = DEM_object.set_attribute (DEM, Nodata_value, DEM, Nodata_value, classification = False)
 
 
         # Here begins the detection process
         print "Identifying the platform and scarps"
+
+        Search_space, Crossover, bins, hist, Inflexion_point = define_search_space (DEM_object, Slope_object, Nodata_value, opt)
+
+
+        print Crossover
+
+
+
+
+        quit()
+
+
+
+
+
+
+
+
+
+
+
+
+
         DEM_work = np.copy(DEM)
         Search_space, Scarps, Platform = MARSH_ID(DEM, Slope, Nodata_value, opt1, opt2, opt3)
         Platform_work = np.copy(Platform)
