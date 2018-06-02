@@ -87,9 +87,11 @@ def main(argv):
 
     # make the plots depending on your choices
     if args.MarshID_plots:
-        MP.Plot_platform_on_hillshade(Input_dir = this_dir, Output_dir = this_dir,Sites=sites)
-        MP.Plot_marsh_outline_on_hillshade(Input_dir = this_dir, Output_dir = this_dir,Sites=sites)
-        MP.Plot_Elevation_PDF(Input_dir = this_dir, Output_dir = this_dir,Sites=sites)
+        #MP.Figure1(Input_dir = this_dir, Output_dir = this_dir, Sites=sites)
+        MP.Figure2(Input_dir = this_dir, Output_dir = this_dir, Sites=sites)
+        #MP.Plot_platform_on_hillshade(Input_dir = this_dir, Output_dir = this_dir,Sites=sites)
+        #MP.Plot_marsh_outline_on_hillshade(Input_dir = this_dir, Output_dir = this_dir,Sites=sites)
+        #MP.Plot_Elevation_PDF(Input_dir = this_dir, Output_dir = this_dir,Sites=sites)
 
 
 #=============================================================================
