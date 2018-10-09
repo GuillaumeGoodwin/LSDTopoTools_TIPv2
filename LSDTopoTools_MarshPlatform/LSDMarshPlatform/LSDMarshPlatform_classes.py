@@ -21,11 +21,13 @@ from matplotlib.lines import Line2D
 
 import timeit
 
-#import LSDMOA_functions as fct
 
 import copy
 
 import pandas as bb
+
+
+import LSDMarshPlatform_functions as fct
 
 ##########################################################################################################
 ##########################################################################################################
@@ -74,20 +76,113 @@ class Land_surface (np.ndarray):
         for M in M_labels:
             print '... Label ', M
             M_outlines = fct.Pandas_outline(self,M,1)
-            if M_outlines.size > 0:
-                print '.... Appending label'
-                Outlines.append(M_outlines)
+            if len(M_outlines) > 0:
+                if M_outlines.size > 0:
+                    print '.... Appending label'
+                    Outlines.append(M_outlines)
         return Outlines
 
 
 
+    def relative_relief (self, Nodata_value):
+        # We calculate the relative relief of the DEM to have values of elevation between 0 and 1
+        Relief = self-np.amin(self[self > Nodata_value])
+        Rel_relief = Relief/np.amax(Relief)
+        Rel_relief[self <= Nodata_value] = Nodata_value
+
+        return Rel_relief
+
+
+
+
+
+    def define_search_space (self, search_arr1, search_arr2, Nodata_value, opt):
+        """
+       This function defines a search space (Search_space) within a 2-D array, based on the combined values of 2 2-D arrays (DEM and Slope) of the same dimensions. It defines the threshold for the selection of the search space according to a threshold value (opt). It is set to ignore elements with a specific value (Nodata_value).
+        Args:
+            DEM (2D numpy array): a 2-D array (here a DEM) used as a first condition for the definition of the search space
+            Slope (2D numpy array): a 2-D array (here a DEM) used as a second condition for the definition of the search space
+            Nodata_value (float): The value for ignored elements
+            opt (float): the value of the threshold for the selection of the search space
+
+        Returns:
+            Search_space (2D numpy array): The resulting search space array. Search_space has a value of 0 for non-selected elements and 1 for selected elements.
+            Crossover (2D numpy array): The array resulting of the multiplication of relative slope and relative relief.
+            bins (1D array): the value bins for the Crossover array
+            hist (1D array): the value hist for the Crossover array
+            Inflecion_point(float): the value of the threshold for the search space selection.
+
+        Author: GCHG
+        """
+
+        print 'Generating a search space ...'
+        SS_object = Search_space(self.shape[0], self.shape[1]); SS_object = 0 * SS_object
+
+        Rr1 = search_arr1.relative_relief(Nodata_value)
+        Rr2 = search_arr2.relative_relief(Nodata_value)
+
+        # This is one type of option for search spaces. We can probs make more later
+        Product = Rr1 * Rr2
+        Product[self <= Nodata_value] = Nodata_value
+
+        bins, hist, step = Product.PDF(Nodata_value, 100)
+
+        Inflexion_point = 0
+
+        # We now find the slope of that curve
+        hist_der = fct.Derivate(bins, hist)
+
+        # If the slope gets above the -1 threshold, now that we have hit the closest point to the origin.
+        # We call it the inflexion point even though it's not really an inflexion point.
+        for j in range(1, len(hist)-1, 1):
+            if hist_der[j] < opt and hist_der[j+1] >= opt:
+                Inflexion_point = bins[j]
+
+        # Points within the search space should have a Crossover value above the inflexion point
+        Search = np.where(Product > Inflexion_point)
+        SS_object[Search] = 1
+
+        # We get rid of the borders of the DEM because otherwise it will be difficult to work with the smaller slope array
+        SS_object[0,:] = 0; SS_object[-1,:] = 0; SS_object[:,0] = 0; SS_object[:,-1] = 0
+
+        # And update the search locations for the shaved edges
+        Search = np.where(SS_object == 1)
+
+        # If this happens, your landscape is weird
+        if np.amax(SS_object) == 0:
+            print; print " ... Your search space is empty! Are you sure there's a marsh platform here?";  print
+            quit()
+
+        return SS_object
+
+
+
+
+    def PDF (self, Nodata_value, numbins):
+        Data1D = self.ravel()
+
+        Max_distribution = max(Data1D)
+        if len(Data1D[Data1D>Nodata_value]) == 0:
+            Min_distribution = -1
+        else:
+            Min_distribution = min(Data1D[Data1D>Nodata_value])
+
+        bin_size = (Max_distribution - Min_distribution) / numbins
+
+        X_values = np.arange(Min_distribution, Max_distribution, bin_size)
+
+        hist, bins = np.histogram (Data1D, X_values, density=True)
+        hist=hist/sum(hist)
+        bins=bins[:-1]
+
+        return bins, hist, bin_size
 
 
 
 
 
 
-    def plot_map (self, save_dir, figname, title, Nodata_value):
+    def plot_map (self, background, save_dir, figname, title, Nodata_value):
         print ' Plotplotplotplot'
         twin  = self.copy()
 
@@ -96,19 +191,480 @@ class Land_surface (np.ndarray):
 
         fig=plt.figure(title, facecolor='White',figsize=[fig_height,fig_width])
 
-        ax1 = plt.subplot2grid((1,1),(0,0),colspan=1, rowspan=2)
+        ax1 = plt.subplot2grid((2,1),(0,0),colspan=1, rowspan=1)
         ax1.tick_params(axis='x', colors='black')
         ax1.tick_params(axis='y', colors='black')
 
         Vmin = min(np.amin(twin[twin!=Nodata_value])*0.95, np.amin(twin[twin!=Nodata_value])*1.05)
         Vmax = max(np.amax(twin)*0.95, np.amax(twin)*1.05)
 
+        Map = ax1.imshow(background, interpolation='None', cmap=plt.cm.binary, vmin=np.amin(background[background!=Nodata_value]), vmax=np.amax(background), alpha = 0.6)
         Map = ax1.imshow(twin, interpolation='None', cmap=plt.cm.gist_earth, vmin=Vmin, vmax=Vmax, alpha = 0.6)
         ax2 = fig.add_axes([0.1, 0.98, 0.85, 0.02])
         scheme = plt.cm.gist_earth; norm = colors.Normalize(vmin=Vmin, vmax=Vmax)
         cb1 = matplotlib.colorbar.ColorbarBase(ax2, cmap=scheme, norm=norm, orientation='horizontal', alpha = 0.6)
 
+
+        #Now plot map properties
+        ax2 = plt.subplot2grid((2,1),(1,0),colspan=1, rowspan=1)
+        ax2.tick_params(axis='map value', colors='black')
+        ax2.tick_params(axis='pdf', colors='black')
+
+        bins, hist, step = self.PDF(Nodata_value, 100)
+
+        hist[0] = 0
+
+        ax2.plot(bins, hist, 'k', linewidth = 3)
+
+
         plt.savefig(save_dir+figname+'.png')
+
+
+
+
+
+    def label_connected (self, Nodata_value):
+        new_array = self.copy()
+        Ref = self.copy()
+        import scipy.ndimage as scim
+        array, numfeat = scim.label(self)
+        for value in np.arange(1, np.amax(array)+1, 1):
+            line = np.where(array == value)
+            new_array[line] = value
+            new_array[Ref == Nodata_value] = Nodata_value
+        return new_array
+
+
+
+
+
+
+##########################################################################################################
+##########################################################################################################
+class Search_space (Land_surface):
+    def __new__ (Search_space, x_length, y_length):
+        print 'In __new__ with class %s' % Search_space
+        return np.ndarray.__new__(Search_space, shape=(x_length, y_length), dtype =np.float)
+    def __init__ (self, x_length, y_length):
+        self.X_length = x_length
+        self.Y_length = y_length
+        self[np.isnan(self)] = 0
+        self = 0 * self
+
+
+    def extract_full_scarps (self, DEM_arr, slope_arr, Nodata_value, opt, clean = True):
+        #1 Get peaks
+        Peaks, slopes_nomax = self.Local_maxima (slope_arr, Nodata_value)
+        #2 Get Initiators
+        Scarps, slopes_nomax = self.Initiate_ridge (slopes_nomax, Peaks, Nodata_value)
+        #3 Continue scarps until they end.
+        scarp_order = 3
+        for order in range(scarp_order, 50):
+            Scarps, slopes_nomax = self.Continue_ridge (slopes_nomax, Scarps, Nodata_value, order)
+
+        if clean == True:
+            Scarps =Scarps.Clean_scarps (DEM_arr, Nodata_value, opt)
+
+        return Scarps
+
+
+    def Local_maxima (self, value_arr, Nodata_value):
+        """
+        This function is the first stage of a routing process used to identify lines of maximum slopes.
+        This function identifies multiple local maxima in an array (Slope), within a predefined search space (Search_space). The identified maxima are given a value of Order.
+
+        Args:
+            Slope (2D numpy array): the input 2-D array, here issued from a slope raster.
+            Search_space (2D numpy array): the search space array in which to look for local maxima.
+            Order (int): the value given to the local maxima points.
+
+        Returns:
+            Peaks (2D numpy array): a 2-D array where the local maxima have a value of Order and other elements are null.
+            Slope_copy (2D numpy array): a copy of the input array where the value of the selected local maxima has been set to 0.
+
+        Author: GCHG
+        """
+        print 'Finding local maxima ...'
+
+        values_nomax = Land_surface(value_arr.shape[0], value_arr.shape[1])
+        values_nomax = values_nomax.set_attribute (value_arr, Nodata_value, value_arr, Nodata_value, classification = False)
+
+        Search = np.where(self == 1) # the searched locations
+
+        Peaks = Scarps_arr(value_arr.shape[0], value_arr.shape[1]); Peaks = 0*Peaks
+
+        for i in range(len(Search[0])):
+            x=Search[0][i]; y=Search[1][i] # coordinates of the kernel's centre
+            Kernel_value = fct.kernel (value_arr, 3, x, y)
+            Kernel_search = fct.kernel(self, 3, x, y)
+
+            # if the centre of the kernel is its maximum and is not an isolated point
+            if Kernel_value[1,1] == np.amax(Kernel_value) and np.amax(Kernel_search[Kernel_search<=Kernel_search[1,1]] > 0):
+                Peaks[x,y] = 1 # The kernel centre becomes a local peak
+                values_nomax[x,y] = 0 # The slope of the modified data array drops to 0
+
+        return Peaks, values_nomax
+
+
+
+
+
+    def Initiate_ridge (self, value_arr, peaks_arr, Nodata_value):
+        """
+        This function is the second stage of a routing process used to identify lines of maximum slopes.
+        This function identifies multiple duplets of elements in an array (Slope), within a predefined search space (Search_space) and within the neighbourhood of the local maxima identified in a second input array (Peaks). The identified elements are given a value of Order. To make this function work, the input array Slope should be the output array Slope_copy of the function peak_flag.
+
+        Args:
+            Slope (2D numpy array): the input 2-D array, here issued from a slope raster where the local maximal values have been replaced by 0.
+            Search_space (2D numpy array): the search space array.
+            Peaks (2D numpy array): A 2-D array containing elements with a value of 1. These elements have the same indices as the elements with a value of 0 in Slope.
+            Order (int): the value given to the identified elements. it should be superior by 1 to the value of Order in the function peak_flag.
+
+        Returns:
+            Ridges (2D numpy array): a 2-D array where the identified elements have a value of Order. This array is modified from the Peaks array and therefore also contains elements of a value equal to the Order in the function peak_flag.
+            Slope_copy (2D numpy array): a copy of the input array where the value of the selected elements has been set to 0.
+
+        Author: GCHG
+        """
+
+        print ' ... Starting ridges ...'
+        values_nomax = Land_surface(value_arr.shape[0], value_arr.shape[1]); values_nomax = 0*values_nomax
+        values_nomax = values_nomax.set_attribute (value_arr, Nodata_value, value_arr, Nodata_value, classification = False)
+
+        Search = np.where(self == 1) # the searched locations
+        Search_peaks = np.where(peaks_arr == 1) # the searched locations where the peaks are
+
+        ridge_arr = Scarps_arr(peaks_arr.shape[0], peaks_arr.shape[1]); ridge_arr = 0*ridge_arr
+        ridge_arr = ridge_arr.set_attribute (peaks_arr, Nodata_value, peaks_arr, Nodata_value, classification = False)
+
+
+        # Define Kernels
+        for i in range(len(Search_peaks[0])):
+            x=Search_peaks[0][i]; y=Search_peaks[1][i] # coordinates of the kernel's centre
+            Kernel_values = fct.kernel (value_arr, 3, x, y)
+            Kernel_values_nomax = fct.kernel (values_nomax, 3, x, y)
+            Kernel_ridges = fct.kernel (ridge_arr, 3, x, y)
+            Kernel_search = fct.kernel (self, 3, x, y)
+
+            # 1/ If there are no other peaks, we have two ridge starters
+            if np.count_nonzero(Kernel_ridges) == 1:
+                Ridge_starter1 = np.where (Kernel_values_nomax == np.amax (Kernel_values_nomax))
+                X1=Ridge_starter1[0][0]; Y1=Ridge_starter1[1][0]
+
+                # if it is within the initial search space
+                if self[x+X1-1, y+Y1-1] != 0:
+                    ridge_arr[x+X1-1, y+Y1-1] = 2
+                    values_nomax[x+X1-1, y+Y1-1] = 0
+
+                    # Look for a second ridge starter
+                    Ridge_starter2 = np.where (Kernel_values_nomax == np.amax (Kernel_values_nomax))
+                    X2=Ridge_starter2[0][0]; Y2=Ridge_starter2[1][0]
+                    Distance = np.sqrt((X2-X1)**2+(Y2-Y1)**2)
+
+                    # if it is within the initial search space AND not next to the first ridge starter
+                    if self[x+X2-1, y+Y2-1] != 0 and Distance > np.sqrt(2):
+                        ridge_arr[x+X2-1, y+Y2-1] = 2
+                        values_nomax[x+X2-1, y+Y2-1] = 0
+
+                    # Otherwise, look for second ridge starter elsewhere in the kernel
+                    elif self[x+X2-1, y+Y2-1] != 0 and Distance <= np.sqrt(2):
+                        for j in np.arange(0,9,1):
+                            Kernel_values_nomax[X2, Y2] = 0
+
+                            Ridge_starter2 = np.where (Kernel_values_nomax == np.amax (Kernel_values_nomax))
+                            X2=Ridge_starter2[0][0]; Y2=Ridge_starter2[1][0]
+                            Distance = np.sqrt((X2-X1)**2+(Y2-Y1)**2)
+
+                            if self[x+X2-1, y+Y2-1] != 0 and Distance > np.sqrt(2):
+                                ridge_arr[x+X2-1, y+Y2-1] = 2
+                                values_nomax[x+X2-1, y+Y2-1] = 0
+                                break
+
+
+            # 2/ If there are two peaks, we have one ridge starter
+            elif np.count_nonzero(Kernel_ridges) == 2:
+                Ridge_starter1 = np.where (Kernel_values_nomax == np.amax (Kernel_values_nomax))
+                X1=Ridge_starter1[0][0]; Y1=Ridge_starter1[1][0]
+
+                # if it is within the initial search space
+                if self[x+X1-1, y+Y1-1] != 0:
+                    ridge_arr[x+X1-1, y+Y1-1] = 2
+                    values_nomax[x+X1-1, y+Y1-1] = 0
+
+        return ridge_arr, values_nomax
+
+
+
+
+    def Continue_ridge (self, value_arr, peaks_arr, Nodata_value, Order):
+        """
+        This function is the third and final stage of a routing process used to identify lines of maximum slopes.
+        IMPORTANT: this function is meant to be run several times! It requires the incrementation of the Order value with each iteration.
+        This function identifies multiple elements in an array (Slope), within a predefined search space (Search_space) and within the neighbourhood of the local maxima identified in a second input array (Peaks).  The identified elements are given a value of Order. To make this function work, the input array Slope should be the output array Slope_copy of the function initiate_ridge.
+
+        Args:
+            Slope (2D numpy array): the input 2-D array, here issued from a slope raster where the elements selected in the initiate_ridge function have been replaced by 0.
+            Search_space (2D numpy array): the search space array.
+            Peaks (2D numpy array): A 2-D array containing elements with a value of 1. These elements have the same indices as the elements with a value of 0 in Slope.
+            Order (int): the value given to the identified elements. On the first iteration it should be superior by 1 to the value of Order in the function initiate_ridge. the value of Order then needs to be incremented with every iteration.
+
+        Returns:
+            Ridges (2D numpy array): a 2-D array where the identified elements have a value of Order. This array is modified from the Peaks array and therefore also contains elements of a value equal to the Order in the functions peak_flag and initiate_ridge.
+            Slope_copy (2D numpy array): a copy of the input array where the value of the selected elements has been set to 0.
+
+        Author: GCHG
+        """
+
+        print ' ... Prolongating ridges ...'
+
+
+
+        values_nomax = Land_surface(value_arr.shape[0], value_arr.shape[1]); values_nomax = 0*values_nomax
+        values_nomax = values_nomax.set_attribute (value_arr, Nodata_value, value_arr, Nodata_value, classification = False)
+
+        Search = np.where(self == 1) # the searched locations
+        Search_peaks = np.where(peaks_arr == Order-1) # the searched locations where the peaks are
+
+        ridge_arr = Scarps_arr(peaks_arr.shape[0], peaks_arr.shape[1]); ridge_arr = 0*ridge_arr
+        ridge_arr = ridge_arr.set_attribute (peaks_arr, Nodata_value, peaks_arr, Nodata_value, classification = False)
+
+
+        # Define Kernels
+        for i in range(len(Search_peaks[0])):
+            x=Search_peaks[0][i]; y=Search_peaks[1][i] # coordinates of the kernel's centre
+
+            Kernel_values = fct.kernel (value_arr, 3, x, y)
+            Kernel_values_nomax = fct.kernel (values_nomax, 3, x, y)
+            Kernel_ridges = fct.kernel (ridge_arr, 3, x, y)
+            Kernel_search = fct.kernel (self, 3, x, y)
+
+            # Count the number of nonzero points in the kernel of the ridge array
+            Ridge_count = np.count_nonzero(Kernel_ridges)
+
+            # If there are only the 2 previous ridge points, draw a third point that is far enough from the previous point
+            if Ridge_count == 2:
+                New_point = np.where (Kernel_values_nomax == np.amax (Kernel_values_nomax))
+                X=New_point[0][0]; Y=New_point[1][0]
+                Grandad_point = np.where (Kernel_ridges == Order-2)
+                Xgd=Grandad_point[0][0]; Ygd=Grandad_point[1][0]
+                Distance = np.sqrt((X-Xgd)**2+(Y-Ygd)**2)
+
+                if self[x+X-1, y+Y-1] != 0 and Distance > np.sqrt(2):
+                    ridge_arr[x+X-1, y+Y-1] = Order
+                    values_nomax[x+X-1, y+Y-1] = 0
+
+                elif self[x+X-1, y+Y-1] != 0 and Distance <= np.sqrt(2):
+                    for j in np.arange(0,9,1):
+                        Kernel_values_nomax[X, Y] = 0
+
+                        New_point = np.where (Kernel_values_nomax == np.amax (Kernel_values_nomax))
+                        X=New_point[0][0]; Y=New_point[1][0]
+                        Distance = np.sqrt((X-Xgd)**2+(Y-Ygd)**2)
+
+                        if self[x+X-1, y+Y-1] != 0 and Distance > np.sqrt(2):
+                            ridge_arr[x+X-1, y+Y-1] = Order
+                            values_nomax[x+X-1, y+Y-1] = 0
+                            break
+
+        return ridge_arr, values_nomax
+
+
+
+
+
+
+
+
+##########################################################################################################
+##########################################################################################################
+class Scarps_arr (Land_surface):
+    def __new__ (Scarps_arr, x_length, y_length):
+        print 'In __new__ with class %s' % Scarps_arr
+        return np.ndarray.__new__(Scarps_arr, shape=(x_length, y_length), dtype =np.float)
+    def __init__ (self, x_length, y_length):
+        self.X_length = x_length
+        self.Y_length = y_length
+        self[np.isnan(self)] = 0
+        self = 0 * self
+
+
+    def Clean_scarps (self, DEM, Nodata_value, opt):
+        """
+        This function eliminates some of the ridges (Peaks) identified by the trio of functions (peak_flag, initiate_ridge and continue_ridge). The elimination process depends on local relief, which uses a DEM (DEM) and a threshold value (opt). It is set to ignore elements with a value of  Nodata_value.
+
+        Args:
+            Peaks (2D numpy array): the input 2-D arraym which is the output of the ridge identification process.
+            DEM (2D numpy array): the DEM array used as a base for the elimination of unnecessary ridges.
+            Nodata_value (float): The value for ignored elements.
+            opt (float): The value of the threshold to eliminate unnecessary ridges.
+
+        Returns:
+            Peaks (2D numpy array): a 2-D array much like the input Peaks array, but the unnecessary elemets have been reset to 0.
+
+        Author: GCHG
+        """
+
+        print "Cleaning up ridges ..."
+        DEM_copy = np.copy(DEM)
+        DEM_copy[DEM_copy==Nodata_value] = 0
+        Search_ridge = np.where (self != 0)
+
+        Cutoff = np.percentile(DEM_copy,75)
+        Threshold = np.amax(DEM_copy[DEM_copy<Cutoff])
+        DEM_copy[DEM_copy>Threshold]=Threshold
+
+        for i in range(len(Search_ridge[0])):
+            x=Search_ridge[0][i]; y=Search_ridge[1][i] # coordinates of the kernel's centre
+            Kernel_DEM = fct.kernel (DEM_copy, 9, x, y)
+            Kernel_DEM[Kernel_DEM==Nodata_value]=0
+
+            if np.amax(Kernel_DEM)/Threshold < opt:
+                self[x,y] = 0
+
+        Search_ridge = np.where (self != 0)
+        for i in range(len(Search_ridge[0])):
+            x=Search_ridge[0][i]; y=Search_ridge[1][i] # coordinates of the kernel's centre
+            Kernel_ridges = fct.kernel (self, 9, x, y)
+            # If there aren't at least 8 ridge points in the neighbourhood of 10 by 10
+            if np.count_nonzero(Kernel_ridges) < 8:
+                self[x,y] = 0
+
+        return self
+
+
+    def clean_scarps_from_marsh(self, Marsh):
+        Search_false_scarp = np.where (self > 0)
+        for i in range(len(Search_false_scarp[0])):
+            x = Search_false_scarp[0][i]; y = Search_false_scarp[1][i]
+            Kernel_marsh = fct.kernel (Marsh, 3, x, y)
+            if np.count_nonzero (Kernel_marsh) == 0:
+                self[x, y] = 0
+
+        # We get rid of the sticky-outy bits
+        Search_ridge = np.where (self > 0)
+        for i in range(len(Search_ridge[0])):
+            x=Search_ridge[0][i]; y=Search_ridge[1][i]
+            Kernel_ridges = fct.kernel (self, 9, x, y)
+            if np.count_nonzero(Kernel_ridges) < 8:
+                self[x,y] = 0
+
+        return self
+
+
+    def extract_platforms (self, DEM, SS_0, Nodata_value, opt):
+        """
+        This function builds a marsh platform array by using the Peaks array as a starting point. It uses the DEM array to establish conditions on the elements to select. the opt parameter sets a threshold value to eliminate superfluous elements. It is set to ignore elements with a value of Nodata_value.
+
+        Args:
+            DEM (2D numpy array): the DEM array.
+            Peaks (2D numpy array): the 2-D array of ridge elements, which is the output of the ridge identification and cleaning process.
+            Nodata_value (float): The value for ignored elements.
+            opt (float): The value of the threshold to eliminate unnecessary elements.
+
+        Returns:
+            Marsh (2D numpy array): a 2-D array where the marsh platform elements are identified by strictly positive values. Other elements have a valuof 0 or Nodata_value.
+
+        Author: GCHG
+        """
+
+        DEM_copy = Land_surface(DEM.shape[0], DEM.shape[1]); DEM_copy = 0*DEM_copy
+        DEM_copy = DEM_copy.set_attribute (DEM, Nodata_value, DEM, Nodata_value, classification = False)
+        Marsh = Marsh_platform(DEM.shape[0], DEM.shape[1]); Marsh = 0*Marsh
+
+        print "Initiate platform ..."
+        Counter = 1
+        Marsh = Marsh.initiate_from_scarps (self, DEM, Nodata_value, Counter)
+
+
+        print ' ... Build platform ...'
+        while Counter < 100:
+            Counter = Counter+1
+            Marsh, DEM_copy = Marsh.prolong_platform (self, DEM, Nodata_value, Counter)
+
+
+
+
+        print ' ... defining the elimination of low platforms ...'
+        Platform = Marsh_platform(Marsh.shape[0], Marsh.shape[1]); Platform = 0*Platform
+        Platform = Platform.set_attribute (Marsh, Nodata_value, Marsh, Nodata_value, classification = False)
+
+        Cutoff_Index, Cutoff_Z = Platform.define_cutoff_Z(DEM, SS_0, Nodata_value, opt)
+
+
+        print 'Cutoff elevation =', Cutoff_Z
+
+
+
+        Marsh[Platform<Cutoff_Z] = 0
+
+
+
+
+        print " ... Fill high areas left blank ..."
+        Marsh = Marsh.fill_high_gaps(DEM, Cutoff_Index, Nodata_value, 3)
+
+
+        print ' ... Fill the interior of pools ...'
+        Marsh = Marsh.fill_pools(self, DEM)
+
+
+
+
+
+
+
+
+        # Reapply the cutoff because the straight line thing is ugly
+        """NB: The method changes here because we redefine Cutoff_Z instead of using the same.
+        This may change accuracy... the old method is below just in case"""
+        Platform = Marsh_platform(Marsh.shape[0], Marsh.shape[1]); Platform = 0*Platform
+        Platform = Platform.set_attribute (Marsh, Nodata_value, Marsh, Nodata_value, classification = False)
+
+        Cutoff_Index, Cutoff_Z = Platform.define_cutoff_Z(DEM, SS_0, Nodata_value, opt)
+        Marsh[Platform<Cutoff_Z] = 0
+
+        #Platform = np.copy(Marsh)
+        #Platform[Platform > 0] = DEM [Platform > 0]
+        #Marsh[Platform<Cutoff_Z] = 0
+
+
+
+        # We fill in the wee holes
+        Marsh = Marsh.fill_wee_holes (self, 105)
+
+
+        print ' ... Adding the ridges'
+        # We get rid of scarps that do not have a marsh next to them
+        self  = self.clean_scarps_from_marsh(Marsh)
+
+        # We put the scarps in the platform
+        Search_scarps = np.where (self > 0)
+        Marsh[Search_scarps] = 110
+
+
+        print " ... eliminate patches of empty elements ..."
+        Marsh = Marsh.fill_high_gaps(DEM, Cutoff_Index, Nodata_value, 3)
+
+        print ' ... Fill the interior of pools ...'
+        Marsh = Marsh.fill_pools(self, DEM)
+
+        print ' ... defining the elimination of low platforms ...'
+        """NB: The method changes here because we redefine Cutoff_Z instead of using the same.
+        This may change accuracy... the old method is below just in case"""
+        Platform = Marsh_platform(Marsh.shape[0], Marsh.shape[1]); Platform = 0*Platform
+        Platform = Platform.set_attribute (Marsh, Nodata_value, Marsh, Nodata_value, classification = False)
+
+        Cutoff_Index, Cutoff_Z = Platform.define_cutoff_Z(DEM, SS_0, Nodata_value, opt)
+        Marsh[Platform<Cutoff_Z] = 0
+
+        #Platform = np.copy(Marsh)
+        #Platform[Platform > 0] = DEM [Platform > 0]
+        #Marsh[Platform<Cutoff_Z] = 0
+
+        Marsh[DEM == Nodata_value] = Nodata_value
+
+
+        return self, Marsh
 
 
 
@@ -130,6 +686,236 @@ class Marsh_platform (Land_surface):
         Labelled_area = len(Selected[0])
 
         return Labelled_area
+
+
+    def initiate_from_scarps (self, Scarps, DEM, Nodata_value, Counter):
+        Counter = 1
+        Search_ridges = np.where (Scarps > 0)
+        for i in range(len(Search_ridges[0])):
+            x=Search_ridges[0][i]; y=Search_ridges[1][i]
+            Kernel_ridges = fct.kernel (Scarps, 3, x, y)
+            Kernel_DEM = fct.kernel (DEM, 3, x, y)
+
+            Marsh_point = np.where (np.logical_and (Kernel_DEM >= Kernel_DEM[1,1], Kernel_ridges == 0))
+            for j in range(len(Marsh_point[0])):
+                X=Marsh_point[0][j]; Y=Marsh_point[1][j]
+                self[x+X-1, y+Y-1] = Counter
+
+        Search_marsh_start = np.where (self == 1)
+        for i in range(len(Search_marsh_start[0])):
+            x=Search_marsh_start[0][i]; y=Search_marsh_start[1][i]
+            Kernel_marsh = fct.kernel (self, 3, x, y)
+            Kernel_ridges = fct.kernel (Scarps, 3, x, y)
+            if np.count_nonzero(Kernel_marsh) <=2:
+                self[x,y] = 0
+
+        return self
+
+
+
+
+    def prolong_platform (self, Scarps, DEM, Nodata_value, Counter):
+
+        DEM_copy = Land_surface(DEM.shape[0], DEM.shape[1]); DEM_copy = 0*DEM_copy
+        DEM_copy = DEM_copy.set_attribute (DEM, Nodata_value, DEM, Nodata_value, classification = False)
+
+        Search_marsh = np.where (self == Counter-1)
+        for i in range(len(Search_marsh[0])):
+            x = Search_marsh[0][i]; y = Search_marsh[1][i]
+            Kernel_DEM = fct.kernel (DEM, 3, x, y)
+            Kernel_DEM_copy = fct.kernel (DEM_copy, 3, x, y)
+            Kernel_ridges = fct.kernel (Scarps, 3, x, y)
+            Kernel_marsh = fct.kernel (self, 3, x, y)
+            Big_Kernel_DEM = fct.kernel (DEM, 11, x, y)
+            Big_Kernel_DEM_copy = fct.kernel (DEM_copy, 11, x, y)
+
+
+            Conditions = np.zeros((len(Kernel_DEM), len(Kernel_DEM[0,:])), dtype = np.float)
+            # 1: free space
+            Condition_1 = np.where (np.logical_and(Kernel_ridges == 0, Kernel_marsh == 0)); Conditions[Condition_1] = 1
+            # 2: not topped
+            Condition_2 = np.where (np.logical_and(Kernel_DEM_copy > np.amax(Big_Kernel_DEM_copy)-0.20, Conditions == 1)); Conditions[Condition_2] = 2
+
+
+            #This is a distance thing to make sure you don't cross the ridges agin
+            Here_be_ridges = np.where (Kernel_ridges != 0)
+            Here_be_parents = np.where (Kernel_marsh == Counter-1)
+
+            for j in range(len(Condition_2[0])):
+                X=Condition_2[0][j]; Y=Condition_2[1][j]
+                Distance_to_ridges = []
+                Distance_to_parents = []
+
+                for k in range(len(Here_be_ridges[0])):
+                    Xr=Here_be_ridges[0][k]; Yr=Here_be_ridges[1][k]
+                    Distance = np.sqrt((X-Xr)**2+(Y-Yr)**2)
+                    Distance_to_ridges.append(Distance)
+
+                for k in range(len(Here_be_parents[0])):
+                    Xp=Here_be_parents[0][k]; Yp=Here_be_parents[1][k]
+                    Distance = np.sqrt((X-Xp)**2+(Y-Yp)**2)
+                    Distance_to_parents.append(Distance)
+
+                if len(Distance_to_ridges)>0:
+                    if len(Distance_to_parents)>0:
+                        if min(Distance_to_ridges) > min(Distance_to_parents):
+                            self[x+X-1, y+Y-1] = Counter
+                else:
+                    self[x+X-1, y+Y-1] = Counter
+                    DEM_copy[x+X-1, y+Y-1] = 0
+
+        return self, DEM_copy
+
+
+
+    def define_cutoff_Z (self, DEM, SS_0, Nodata_value, opt):
+        self[self > 0] = DEM [self > 0]
+        Platform_bins, Platform_hist, Platform_step = self.PDF(Nodata_value, 100)
+
+        #1. Find the highest and biggest local maximum of frequency distribution
+        # Initialize Index
+        Index = len(Platform_hist)-1
+        # Initiate Cutoff_Z value
+        Cutoff_Z = 0
+
+        for j in range(1,len(Platform_hist)-1):
+            if Platform_hist[j]>0.9*max(Platform_hist[1:]) and Platform_hist[j]>Platform_hist[j-1] and Platform_hist[j]>Platform_hist[j+1]:
+                Index  = j
+
+        #2. Now run a loop from there toward lower elevations.
+        Counter = 0
+        for j in range(Index,0,-1):
+            # See if you cross the mean value of frequency. Count for how many indices you are under.
+            if Platform_hist[j] < np.mean(Platform_hist):
+                Counter = Counter + 1
+            # Reset the counter value if you go above average again
+            else:
+                Counter = 0
+
+            #If you stay long enough under (10 is arbitrary for now), initiate cutoff and stop the search
+            if Counter > opt:
+                Cutoff = j
+                Cutoff_Z = Platform_bins[Cutoff]
+                break
+
+        # If you stay under for more than 5, set a Cutoff_Z value but keep searching
+        if Counter > opt/2:
+            Cutoff = j
+            Cutoff_Z = Platform_bins[Cutoff]
+
+
+        # Make sure the Cutoff_Z is higher than the lowest initial search space elevation
+        """THIS IS UNPUBLISHED STUFF. IT MIGHT CHANGE THE ACCURACY. TEST IT A COUPLE OF TIMES"""
+        SS_1 = SS_0*DEM
+        bins, hist, step = SS_1.PDF(Nodata_value, 100)
+        zero_point = np.where(bins == 0.)[0]; hist[zero_point] = 0
+
+        low_proportion = 0.01 * max(hist)
+        low_proportion_index = np.where(hist > low_proportion)[0][0]
+
+        SS_0_cutoff_Z = bins[low_proportion_index]
+
+        if SS_0_cutoff_Z > Cutoff_Z:
+            Cutoff_Z = SS_0_cutoff_Z
+
+        return Index, Cutoff_Z
+
+
+
+    def fill_high_gaps(self, DEM, Index, Nodata_value, value):
+        Platform_bins, Platform_hist, Platform_step = self.PDF(Nodata_value, 100)
+        Search_marsh_condition = np.zeros((len(DEM), len(DEM[0,:])), dtype = np.float)
+        Search_marsh = np.where (DEM >= Platform_bins[Index])
+        Search_marsh_condition [Search_marsh] = 1
+        Search_marsh_2 = np.where (np.logical_and(self == 0, Search_marsh_condition == 1))
+        self[Search_marsh_2] = value
+
+        return self
+
+
+
+
+    def fill_pools(self, Scarps, DEM):
+        for Iteration in np.arange(0,10,1):
+            Counter = 100
+            while Counter > 2:
+                print Counter
+                Counter = Counter-1
+                Search_marsh = np.where (self == Counter+1)
+                Non_filled = 0
+                for i in range(len(Search_marsh[0])):
+                    x = Search_marsh[0][i]; y = Search_marsh[1][i]
+                    Kernel_DEM = fct.kernel (DEM, 3, x, y)
+                    Kernel_ridges = fct.kernel (Scarps, 3, x, y)
+                    Kernel_marsh = fct.kernel (self, 3, x, y)
+
+                    if Non_filled <len(Search_marsh[0]):
+                        if np.count_nonzero(Kernel_marsh) > 6:
+                            Condition = np.where (np.logical_and(Kernel_marsh == 0, Kernel_ridges == 0))
+                            for j in range(len(Condition[0])):
+                                X=Condition[0][j]; Y=Condition[1][j]
+                                self[x+X-1, y+Y-1] = Counter
+                        else:
+                            Non_filled = Non_filled + 1
+
+        return self
+
+
+
+    def fill_wee_holes (self, Scarps, value):
+        Search_marsh = np.where (np.logical_and(self == 0, Scarps == 0))
+        for i in range(len(Search_marsh[0])):
+            x = Search_marsh[0][i]; y = Search_marsh[1][i]
+            Kernel_marsh = fct.kernel (self, 3, x, y)
+            if np.count_nonzero(Kernel_marsh) == 8:
+                self[x,y] = value
+
+        return self
+
+
+
+    def edges_to_shp(self, dir, name, envidata, Nodata_value):
+
+        self_labels = self.label_connected (Nodata_value)
+
+        if not os.path.isfile(dir+name+'_Out.pkl'):
+            Outlines = self_labels.extract_outlines()
+            Outlines.Save_as_pickle(dir,name+'_Out.pkl')
+
+        else:
+            print 'Loading outlines from Pickle'
+            Outlines = pickle.load( open(dir+name+'_Out.pkl', "rb" ) )
+
+        print Outlines
+        Outlines.save_to_shp (envidata, dir, name, multiple = False)
+
+
+
+
+
+        quit()
+
+        """if not os.path.isfile(dir+file[:-4]+'.pkl'):
+            Outlines = Marsh_labels.extract_outlines()
+            Outlines.Save_as_pickle(Output_dir+'Marsh_metrics/',str(site)+'_Out.pkl')
+
+        else:
+            print 'Loading outlines from Pickle'
+            Outlines = pickle.load( open(file[:-4]+'.pkl', "rb" ) )
+        Outlines.save_to_shp (envidata_DEM, DEM, Output_dir+'Shapefiles/', site, multiple = False)
+
+
+
+        +'Marsh_metrics/'+str(site)+'_Out.pkl'):
+            print 'Extracting outlines from array'
+            Outlines = Marsh_labels.extract_outlines()
+            Outlines.Save_as_pickle(Output_dir+'Marsh_metrics/',str(site)+'_Out.pkl')
+        else:
+            print 'Loading outlines from Pickle'
+            Outlines = pickle.load( open( Output_dir+'Marsh_metrics/'+str(site)+'_Out.pkl', "rb" ) )
+        Outlines.save_to_shp (envidata_DEM, DEM, Output_dir+'Shapefiles/', site, multiple = False)
+
+        """
 
 
 
@@ -262,7 +1048,7 @@ class Marsh_outline (Land_surface):
 
         return Length_array, Polylines
 
-##########################################################################################################
+#######################################################################################################
 ##########################################################################################################
 class Point (tuple):
     """With this class we make a point that has row and column attributes."""
@@ -345,14 +1131,14 @@ class Line (bb.DataFrame):
         fct.Line_to_shp(self, Envidata, Enviarray, save_dir, file_name)
 
 
-    def Pandaline_to_shp (self, Envidata, Enviarray, save_dir, site_name):
+    def Pandaline_to_shp (self, Envidata, save_dir, site_name):
         value_range = range(min(self['L_code']),max(self['L_code'])+1)
         for L in value_range:
             To_save = self.loc[self['L_code'] == L]
             M_code = To_save['M_code'][0]
             L_code = To_save['L_code'][0]
             file_name = str(site_name)+'_'+str(M_code)+'_'+str(L_code)
-            fct.Line_to_shp(To_save, Envidata, Enviarray, save_dir, file_name)
+            fct.Line_to_shp(To_save, Envidata, save_dir, file_name)
 
 
     def prepare_for_plotting(self,colour,opaque = True):
@@ -396,16 +1182,7 @@ class Line (bb.DataFrame):
             in_name = str(site_name)+'_'+str(M_code)+'_'+str(L_code)+'.shp'
             out_name = str(site_name)+'_'+str(M_code)+'_'+str(L_code)+'_Tr.shp'
 
-            print in_name
-
             fct.Make_transects(save_dir+'Shapefiles/'+in_name, save_dir+'Shapefiles/'+out_name, spacing, length)
-
-            print out_name
-
-
-            print
-
-
 
             os.system('rm '+save_dir+'Shapefiles/'+str(site_name)+'_'+str(M_code)+'_'+str(L_code)+'.*')
 
@@ -531,7 +1308,7 @@ class Transect (Line):
 
 
     def select_transect (self, Nodata_value):
-        """Only use if you already have a Marsh attribute"""
+        """Only use if you already have Marsh and Z attribute"""
         if self.size > 0:
             Select_list = []
             step = max(self.index)+1
@@ -539,6 +1316,8 @@ class Transect (Line):
                 Start = i; End = i+step
                 Zeros = np.where(np.asarray(self['Marsh'].iloc[Start:End]) < 0.5)
                 Ones = np.where(np.asarray(self['Marsh'].iloc[Start:End]) > 0.5)
+                #print Ones
+                #print Zeros
                 if len(Zeros[0]) == 0 or len(Ones[0]) == 0:
                     for j in range(step):
                         Select_list.append(False)
@@ -551,6 +1330,9 @@ class Transect (Line):
                 else:
                     for j in range(step):
                         Select_list.append(True)
+
+                #print Select_list
+                #quit()
             self.add_attribute_list ('select', Select_list)
         return self
 
@@ -574,6 +1356,57 @@ class Transect (Line):
 
 
 
+    def squish(self, profile_length):
+
+        transect_len = profile_length
+        # Make a new transect object
+        Squished_self = Transect()
+
+        # Give it the columns you want
+        Squished_self['T_code'] = [1]
+        Squished_self['rowcol'] = [Point(1,1)]
+
+        content_ini = (1.,)
+        for x in range(transect_len):
+            content = content_ini + (x,)
+            content_ini = content
+        Squished_self['bearing'] = [1]
+
+        i = 1
+        for t in range(min(self['T_code']), max(self['T_code'])+1):
+            this_transect = self[self['T_code']==t]
+
+            code = this_transect['T_code'].values[0]
+
+            coord_start, coord_end = this_transect['rowcol'].values[0], this_transect['rowcol'].values[-1]
+            Z_list = tuple(this_transect['Z'].values)
+            dZ_list = tuple(this_transect['dZ'].values)
+            bearing = this_transect['bear'].values[1]
+            select = this_transect['select'].values[0]
+
+            element = bb.DataFrame({'T_code': [code,code], 'rowcol':[coord_start,coord_end], 'Z_dZ':[Z_list,dZ_list], 'bearing':[bearing,bearing], 'select':[select,select]})
+
+            top = Squished_self[0:i]; bottom = Squished_self[i:]
+            Squished_self=bb.concat((top,element,bottom))
+            Squished_self = Squished_self.reset_index(drop=True)
+
+            i+=2
+
+        Squished_self = Squished_self[1:]
+
+        return Squished_self
+
+
+
+    def save_to_fullshp(self, envidata, save_file):
+        fct.Transect_to_fullshp(self, envidata, save_file)
+
+
+
+
+
+
+
 ##########################################################################################################
 ##########################################################################################################
 class Polyline (list):
@@ -587,23 +1420,40 @@ class Polyline (list):
             pickle.dump(self,handle)
 
 
-    def save_to_shp (self, Envidata, Enviarray, save_dir, site_name):
+    def save_to_shp (self, Envidata, save_dir, site_name, multiple = True):
+        if multiple is True:
+            for i in range(len(self)):
+                Outline = self[i]
+                Outline.Pandaline_to_shp(Envidata, save_dir, site_name)
+        else:
+            Outline = self
+            file_name = str(site_name)+'_MarshOutline'
+            fct.Polyline_to_shp (Outline, Envidata, save_dir, file_name)
+
+
+    def Transects_to_fullshp (self, envidata, save_file):
         for i in range(len(self)):
-            Outline = self[i]
-            Outline.Pandaline_to_shp(Envidata, Enviarray, save_dir, site_name)
+            self[i].save_to_fullshp(envidata, save_file)
 
 
-    def Polyline_transects (self, spacing, length, Envidata, Enviarray, save_dir, site_name, needs_saving = False):
+
+    def Polyline_transects (self, length, Envidata, Enviarray, save_dir, site_name, needs_saving = False):
         #if you haven't done so yet, save your polyline to a .shp
         if needs_saving is True:
             self.save_to_shp (Envidata, Enviarray, save_dir, site_name)
-        #Make a Polyline to store all those transects
-        All_transects = Polyline()
-        # For each Line in the Polyline
+
+        in_name = str(site_name)+'_MarshOutline.shp'
+        out_name = str(site_name)+'_OutlineProfiles.shp'
+
+        # Produce transects for the outline shapefiles
+        fct.Make_transects(save_dir+'Shapefiles/'+in_name, save_dir+'Shapefiles/'+out_name, spacing, length)
+
+
+    def squish_properties(self, profile_length):
+        # This one condenses the properties of a long pandas into a shorter pandas
         for i in range(len(self)):
-            Transects = self[i].Line_transects(spacing, length, Envidata, Enviarray, save_dir, site_name)
-            All_transects.append(Transects)
-        return All_transects
+            self[i] = self[i].squish(profile_length)
+        return self
 
 
     def get_attribute_from_basemap (self, refinement, basemap, attr_name, Nodata_value):
@@ -614,9 +1464,7 @@ class Polyline (list):
                 if attr_name == 'Z':
                     self[i] = self[i].orient_seaward()
                     self[i] = self[i].slope_1D()
-                    #print self[i]
                     self[i] = self[i].get_bearing()
-                    #print self[i]
                 if attr_name == 'Marsh':
                     self[i] = self[i].select_transect(Nodata_value)
         return self
@@ -704,7 +1552,7 @@ class Polyline (list):
              xy=(0.05, 0.05),
              xycoords='axes fraction')
 
-        ax3.set_xlim(0,20)
+        ax3.set_xlim(0,10)
         #ax3.set_ylim(ymin=-2, ymax = 10)
 
         colour = 0
@@ -723,7 +1571,7 @@ class Polyline (list):
                             if Pandaline_zest['select'].iloc[0] == True:
                                 ax3.plot(Pandaline_zest['Z'], color = plt.cm.jet(colour*50))
 
-        ax3.axvline(10, color='black', lw=1.0, alpha=0.8)
+        ax3.axvline(5, color='black', lw=1.0, alpha=0.8)
 
         ax4 = fig.add_axes([0.55, 0.98, 0.345, 0.02])
         scheme = plt.cm.jet; norm = colors.Normalize(vmin=0, vmax=colour)

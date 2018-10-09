@@ -13,8 +13,15 @@ from osgeo import gdal, osr, gdalconst
 from osgeo.gdalconst import *
 import cPickle
 
+import pandas as bb
+
+from osgeo import ogr, osr
+from shapely.geometry import LineString
+
+import fiona
 
 
+import LSDMarshPlatform_classes as cl
 #---------------------------------------------------------------
 def ENVI_raster_binary_to_2d_array(file_name):
     """
@@ -75,6 +82,7 @@ def ENVI_raster_binary_to_2d_array(file_name):
         print 'Convert image to 2D array'
         print '~~~~~~~~~~~~~~'
         band = inDs.GetRasterBand(1)
+        print band
         image_array = band.ReadAsArray(0, 0, cols, rows)
         image_array_name = file_name
         print type(image_array)
@@ -133,41 +141,278 @@ def ENVI_raster_binary_from_2d_array(envidata, file_out, post, image_array):
 
 
 
-#-----------------------------------------------------------------------------------------------------------
-def Distribution(Data2D, Nodata_value):
+##########################################################################################################
+##########################################################################################################
+def Pandas_outline (Surface_array, M_code, scale):
     """
-    This simple function takes a 2-D array (Data2D) and makes a probability distribution of its values. It is set to ignore elements with a specific value (Nodata_value).
+    This magic function from the internet (https://stackoverflow.com/questions/24539296/outline-a-region-in-a-graph) takes an array of positives v. negatives and outlines the border between the two. It gives you a nice Pandas Dataframe at the end.
 
     Args:
-        Data2D (2D numpy array): the 2D array you want a distribution for
-        Nodata_value (float): The value for ignored elements
 
     Returns:
-        bins [1D numpy array]: the value bins
-        hist [1D numpy array]: the probability associated to the bins
 
     Author: GCHG
     """
 
-    Data1D = Data2D.ravel()
+    image = Surface_array
+    maskimg = np.zeros(Surface_array.shape, dtype='int')
+    maskimg[image == M_code] = 3
 
-    Max_distribution = max(Data1D)
-    if len(Data1D[Data1D>Nodata_value]) == 0:
-        Min_distribution = -1
-    else:
-        Min_distribution = min(Data1D[Data1D>Nodata_value])
+    x0 = 0; x1 = Surface_array.shape[1]
+    y0 = 0; y1 = Surface_array.shape[0]
 
-    bin_size = (Max_distribution - Min_distribution) / 100
-
-    X_values = np.arange(Min_distribution, Max_distribution, bin_size)
-
-
-    hist, bins = np.histogram (Data1D, X_values, density=True)
-    hist=hist/sum(hist)
-    bins=bins[:-1]
+    # our image with the numbers 1-3 is in array maskimg
+    # create a boolean image map which has trues only where maskimg[x,y] == 3
+    mapimg = (maskimg == 3)
 
 
-    return bins,hist
+    # a vertical line segment is needed, when the pixels next to each other horizontally
+    #   belong to diffferent groups (one is part of the mask, the other isn't)
+    # after this ver_seg has two arrays, one for row coordinates, the other for column coordinates
+    ver_seg = np.where(mapimg[:,1:] != mapimg[:,:-1])
+    # the same is repeated for horizontal segments
+    hor_seg = np.where(mapimg[1:,:] != mapimg[:-1,:])
+
+    # if we have a horizontal segment at 7,2, it means that it must be drawn between pixels
+    #   (2,7) and (2,8), i.e. from (2,8)..(3,8)
+    # in order to draw a discountinuous line, we add Nones in between segments
+    l = []
+    for p in zip(*hor_seg):
+        l.append((p[1], p[0]+1))
+        l.append((p[1]+1, p[0]+1))
+        l.append((np.nan,np.nan))
+
+    # and the same for vertical segments
+    for p in zip(*ver_seg):
+        l.append((p[1]+1, p[0]))
+        l.append((p[1]+1, p[0]+1))
+        l.append((np.nan, np.nan))
+
+    # now we transform the list into a numpy array of Nx2 shape
+    segments = np.array(l)
+    # now we need to know something about the image which is shown
+    #   at this point let's assume it has extents (x0, y0)..(x1,y1) on the axis
+    #   drawn with origin='lower'
+    # with this information we can rescale our points
+
+
+
+    if len(segments) > 0:
+
+        segments[:,0] = (x0 + (x1-x0) * segments[:,0] / mapimg.shape[1]) - scale/2.
+        segments[:,1] = (y0 + (y1-y0) * segments[:,1] / mapimg.shape[0]) - scale/2.
+
+        #This is me now ^^
+        M_outline = stitch_segments(segments,M_code)
+
+    else: M_outline = []
+
+
+    return M_outline
+
+
+##########################################################################################################
+##########################################################################################################
+def stitch_segments (segments, M_code, reset_length = False, select_longest = True):
+    """This function stitches tiny segments into something that makes sense"""
+
+    #Initiate the objects
+    segments[np.isnan(segments)] = 0
+
+    Original_seg_length = len(segments)
+
+
+    L_code = 1
+    # This is the list of outlines
+    M_outlines = cl.Polyline()
+
+    # loop until all the segments are stitched
+    while np.amax(segments) != 0:
+    #while len(segments) >= 1:
+        #print 'These be the segments'
+        #print segments [:12]
+        #print len(segments)
+        #print
+        # Setup the pandas outline
+        M_outline = cl.Line()
+
+
+        #Start = timeit.default_timer()
+
+        #Find the first non-null element in the array
+        nonzero_x = np.where(segments[:,0]!=0)[0][0]
+        nonzero_y = np.where(segments[:,1]!=0)[0][0]
+
+        # choose a this segment to be the first element in the Pandas
+        M_outline.set_first_point(M_code, L_code, segments[nonzero_y,1], segments[nonzero_x,0], 1)
+        M_outline = M_outline.add_element(1,M_code, L_code, segments[nonzero_y+1,1], segments[nonzero_x+1,0])
+
+        segments = segments[3:]
+
+        # Now stitch the connected segments together in both directions. Because we're 2D, bruv!
+        for d in [-1,0]:
+            for i in range(3,Original_seg_length,3):
+                # Find a segment that starts at the end of the previous segment
+
+                #print M_outline
+
+                last_point = M_outline['rowcol'].iloc[d]
+                find_next = np.where(np.logical_and(segments[:,1] == last_point.row(), segments[:,0] == last_point.col()))[0]
+
+                #print find_next
+
+                if len(find_next) > 0:
+
+                    # Add the segment. Invert it if need be.
+                    for j in range(len(find_next)):
+                        if find_next[j]/3. == find_next[j]//3:
+                            M_outline = M_outline.add_element(-d*len(M_outline['rowcol']),M_code, L_code, segments[find_next[j]+1,1], segments[find_next[j]+1,0])
+
+                            #print segments[find_next[j]:find_next[j]+3,:]
+
+                            #segments = np.delete(segments, np.s_[find_next[j]:find_next[j]+3], 0)
+                            segments[find_next[j]:find_next[j]+3,:] = 0
+
+                        elif (find_next[j]-1)/3. == (find_next[j]-1)//3:
+                            M_outline = M_outline.add_element(-d*len(M_outline['rowcol']),M_code, L_code, segments[find_next[j]-1,1], segments[find_next[j]-1,0])
+
+                            #print segments[find_next[j]-1:find_next[j]+2,:]
+
+                            #segments = np.delete(segments, np.s_[find_next[j]-1:find_next[j]+2], 0)
+                            segments[find_next[j]-1:find_next[j]+2,:] = 0
+
+                else:
+                    break
+
+            #print
+            #print M_outline
+
+            #Stop = timeit.default_timer()
+            #time = Stop - Start
+            #print 'runtime:', time
+            #quit()
+
+
+
+        #Recalculate the distances to make it nicer. Takes a loooong time
+        if reset_length is True:
+            M_outline = M_outline.recalc_length(1)
+
+        #add this outline to the list of outlines
+        M_outlines.append(M_outline)
+
+        # update the L_code counter
+        print 'Processed Line:', L_code
+
+        #print 'These be the new segments'
+        #print segments
+        #print len(segments)
+        #print
+
+        #print M_outline
+        #Stop = timeit.default_timer()
+        #time = Stop - Start
+        #print 'runtime:', time
+        #quit()
+
+
+        L_code+=1
+
+    #This part is to group everything in one Pandas instead of a silly list
+    Final_outlines = M_outlines[0]
+    for i in range(1,len(M_outlines)):
+        Final_outlines = bb.concat([Final_outlines,M_outlines[i]])
+
+    if select_longest is True:
+        Lengths = []
+        value_range = [min(Final_outlines['L_code']),max(Final_outlines['L_code'])]
+        for L in value_range:
+            Lengths.append(len(Final_outlines.loc[Final_outlines['L_code'] == L]))
+        Longest = max(Lengths)
+        for L in value_range:
+            if len(Final_outlines.loc[Final_outlines['L_code'] == L]) < 0.5 * Longest:
+                Final_outlines = Final_outlines[Final_outlines.L_code != L]
+
+    return Final_outlines
+
+
+##########################################################################################################
+##########################################################################################################
+def Polyline_to_shp (line, Envidata, save_dir, file_name):
+    """
+    This function takes all these masses of wriggly lines and turns each of them into a shapefile. This is going to take a lot of space, so we should probably think of deleting the shapefiles when we're done with them.
+
+    Args:
+        Surface_array (2D numpy array): a 2-D array containing the surface to outline with the value 1. Undesirable elements have the value 0 or Nodata_value.
+        Outline_array (2D numpy array): a 2-D array destined to store the outline.
+        Outline_value (float): The value to be given to outline cells
+        Nodata_value (float): The value for empty cells
+
+    Returns:
+        Nothing. It just saves a bunch of shapefiles
+
+    Author: GCHG
+    """
+
+    X_origin = Envidata[0][0]; X_cell_width = Envidata[0][1]
+    Y_origin = Envidata[0][3]; Y_cell_width = Envidata[0][5]
+
+
+
+    spatialReference = osr.SpatialReference() #will create a spatial reference locally to tell the system what the reference will be
+    spatialReference.ImportFromProj4('+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +ellps=airy +towgs84=375,-111,431,0,0,0,0 +units=m +no_defs') #here we define this reference to be utm Zone 48N with wgs84...
+
+    # Now convert it to a shapefile with OGR
+    driver = ogr.GetDriverByName('Esri Shapefile')
+    ds = driver.CreateDataSource('%s/%s.shp' % (save_dir,file_name))
+    layer = ds.CreateLayer('', spatialReference, ogr.wkbLineString)
+    # Add one attribute
+    layer.CreateField(ogr.FieldDefn('id', ogr.OFTInteger))
+    defn = layer.GetLayerDefn()
+
+
+    ## If there are multiple geometries, put the "for" loop here
+    #Coord_list = []
+    for subline in line:
+        x_offset,y_offset = 0,0
+
+        value_range = range(min(subline['L_code']),max(subline['L_code'])+1)
+        for L in value_range:
+            To_save = subline.loc[subline['L_code'] == L]
+
+            #Initiate list of coordinates
+            Coordinates = []
+            for i in range(len(To_save['rowcol'])):
+                x = To_save['rowcol'].iloc[i].col()
+                y = To_save['rowcol'].iloc[i].row()
+                coord_pair = (X_cell_width * x + X_origin + x_offset, Y_cell_width * y + Y_origin + y_offset)
+                Coordinates.append(coord_pair)
+
+            # Make a Shapely geometry
+            poly = LineString(Coordinates)
+
+            # Create a new feature (attribute and geometry)
+            feat = ogr.Feature(defn)
+            feat.SetField('id', 123)
+            # Make a geometry, from Shapely object
+            geom = ogr.CreateGeometryFromWkb(poly.wkb)
+            feat.SetGeometry(geom)
+            layer.CreateFeature(feat)
+    #feat = geom = None  # destroy these
+    # Save and close everything
+    ds = layer = feat = geom = None
+
+    print "file saved:" '%s/%s.shp' % (save_dir,file_name)
+
+
+##########################################################################################################
+##########################################################################################################
+def Derivate (x, y):
+    x_step = (max(x)-min(x)) / len(x)
+    dy = np.zeros(len(y), dtype = np.float)
+    for j in range(1, len(y), 1):
+        dy[j] = (y[j]-y[j-1])/x_step
+    return dy
 
 
 
@@ -206,128 +451,6 @@ def Outline (Raster, Outline_value, Nodata_value):
 
 
 
-#-----------------------------------------------------------------------------------------------------
-def define_search_space (DEM, Slope, Nodata_value, opt):
-    """
-   This function defines a search space (Search_space) within a 2-D array, based on the combined values of 2 2-D arrays (DEM and Slope) of the same dimensions. It defines the threshold for the selection of the search space according to a threshold value (opt). It is set to ignore elements with a specific value (Nodata_value).
-    Args:
-        DEM (2D numpy array): a 2-D array (here a DEM) used as a first condition for the definition of the search space
-        Slope (2D numpy array): a 2-D array (here a DEM) used as a second condition for the definition of the search space
-        Nodata_value (float): The value for ignored elements
-        opt (float): the value of the threshold for the selection of the search space
-
-    Returns:
-        Search_space (2D numpy array): The resulting search space array. Search_space has a value of 0 for non-selected elements and 1 for selected elements.
-        Crossover (2D numpy array): The array resulting of the multiplication of relative slope and relative relief.
-        bins (1D array): the value bins for the Crossover array
-        hist (1D array): the value hist for the Crossover array
-        Inflecion_point(float): the value of the threshold for the search space selection.
-
-    Author: GCHG
-    """
-
-
-    print 'Choosing a holiday destination ...'
-    Height = len(DEM); Width = len(DEM[0,:])
-    Search_space = np.zeros((Height,Width), dtype=np.float)
-
-    # We calculate the relative relief of the DEM to have values of elevation between 0 and 1
-    Relief = DEM-np.amin(DEM[DEM > Nodata_value])
-    print 'DEM bounds', np.amin(DEM)
-    print 'relief ini', np.amin(Relief[Relief!=Nodata_value]), np.amin(DEM[DEM > Nodata_value])
-
-    Rel_relief = Relief/np.amax(Relief)
-    Rel_relief[DEM <= Nodata_value] = Nodata_value
-
-    # We then do the same thing for slope
-    Rel_slope = Slope/np.amax(Slope)
-    Rel_slope[Slope == Nodata_value] = Nodata_value
-    Rel_slope[Rel_relief == Nodata_value] = Nodata_value
-
-    print 'relief', np.amin(Rel_relief[Rel_relief!=Nodata_value]), np.amax(Rel_relief)
-    print 'slopes', np.amin(Rel_slope[Rel_slope!=Nodata_value]), np.amax(Rel_slope)
-
-
-
-    # We then multiply these new relative relief and slope arrays and biologically name them "Crossover"
-    Crossover = Rel_relief * Rel_slope
-    Crossover[DEM <= Nodata_value] = Nodata_value
-
-
-
-    # We make a curve of the frequency of values in this Crossover
-    # That curve should look like a decreasing exponential function
-    data = Crossover.ravel(); data = data[data>0]
-
-    step = (max(data) - min(data)) / 100
-
-    value = np.arange(min(data), max(data), step)
-    hist, bins = np.histogram (data, value, density=True)
-    #hist, bins = Distribution(Crossover, Nodata_value)
-    hist=hist/sum(hist); bins=bins[:-1]
-
-
-    #Let's make a figure to check
-    fig=plt.figure(1, facecolor='White',figsize=[10,10])
-    ax1 = plt.subplot2grid((1,1),(0,0),colspan=1, rowspan=1)
-
-    # Name the axes
-    ax1.set_xlabel('Elevation (m)', fontsize = 12)
-    ax1.set_ylabel('Probability Distribution (m)', fontsize = 12)
-
-    ax1.plot( bins, hist, '-r', linewidth = 2.0)
-
-
-    # Set the ticks
-    A = 0.01
-    #for x in range(len(hist_M)-1):
-        #if hist_M[x]==0 and hist_M[x+1]>0:
-            #A = bins_M[x]
-            #break
-    #xmin = max(-5,A)
-    ymax = max(hist)
-
-    #ax1.set_xlim (xmin = xmin)
-    ax1.set_ylim (ymin = 0, ymax = ymax*1.05)
-
-
-
-
-    plt.savefig('Test_figs/Elevation_PDF.png' )
-
-
-    Inflexion_point = 0
-
-    # We now find the slope of that curve
-    hist_der = np.zeros(len(hist), dtype = np.float)
-    for j in range(1, len(hist), 1):
-        hist_der[j] = (hist[j]-hist[j-1])/step
-
-    # If the slope gets above the -1 threshold, now that we have hit the closest point to the origin.
-    # We call it the inflexion point even though it's not really an inflexion point.
-    for j in range(1, len(hist)-1, 1):
-        if hist_der[j] < opt and hist_der[j+1] >= opt:
-            Inflexion_point = bins[j]
-
-    # Points within the search space should have a Crossover value above the inflexion point
-    Search = np.where(Crossover > Inflexion_point)
-    Search_space[Search] = 1
-
-    # We get rid of the borders of the DEM because otherwise it will be difficult to work with the smaller slope array
-    Search_space[0,:] = 0; Search_space[Height-1,:] = 0; Search_space[:,0] = 0; Search_space[:,Width-1] = 0
-
-    # And update the search locations for the shaved edges
-    Search = np.where(Search_space == 1)
-
-    # If this happens, your landscape is weird
-    if np.amax(Search_space) == 0:
-        print
-        print " ... Your search space is empty! Are you sure there's a marsh platform here?"
-        print
-        quit()
-
-    return Search_space, Crossover, bins, hist, Inflexion_point
-
 
 #-----------------------------------------------------------------------------------------------------
 def kernel (array, kernel_size, x_centre, y_centre):
@@ -365,480 +488,6 @@ def kernel (array, kernel_size, x_centre, y_centre):
         pass
 
     return kernel
-
-
-#-----------------------------------------------------------------------------------------------------
-def peak_flag (Slope, Search_space, Order):
-    """
-    This function is the first stage of a routing process used to identify lines of maximum slopes.
-    This function identifies multiple local maxima in an array (Slope), within a predefined search space (Search_space). The identified maxima are given a value of Order.
-
-    Args:
-        Slope (2D numpy array): the input 2-D array, here issued from a slope raster.
-        Search_space (2D numpy array): the search space array in which to look for local maxima.
-        Order (int): the value given to the local maxima points.
-
-    Returns:
-        Peaks (2D numpy array): a 2-D array where the local maxima have a value of Order and other elements are null.
-        Slope_copy (2D numpy array): a copy of the input array where the value of the selected local maxima has been set to 0.
-
-    Author: GCHG
-    """
-
-    print 'Finding local slope maxima ...'
-    Slope_copy = np.copy(Slope) # the copy of the initial data array
-    Search = np.where(Search_space == 1) # the searched locations
-    Peaks = np.zeros((len(Slope),len(Slope[0,:])),dtype = np.float)
-
-    for i in range(len(Search[0])):
-        x=Search[0][i]; y=Search[1][i] # coordinates of the kernel's centre
-        Kernel_slope = kernel (Slope, 3, x, y)
-        Kernel_search = kernel(Search_space, 3, x, y)
-
-        # if the centre of the kernel is its maximum and is not an isolated point
-        if Kernel_slope[1,1] == np.amax(Kernel_slope) and np.amax(Kernel_search[Kernel_search<=Kernel_search[1,1]] > 0):
-            Peaks[x,y] = Order # The kernel centre becomes a local peak
-            Slope_copy[x,y] = 0 # The slope of the modified data array drops to 0
-
-    return Peaks, Slope_copy
-
-
-
-#-----------------------------------------------------------------------------------------------------
-def initiate_ridge (Slope, Search_space, Peaks, Order):
-    """
-    This function is the second stage of a routing process used to identify lines of maximum slopes.
-    This function identifies multiple duplets of elements in an array (Slope), within a predefined search space (Search_space) and within the neighbourhood of the local maxima identified in a second input array (Peaks). The identified elements are given a value of Order. To make this function work, the input array Slope should be the output array Slope_copy of the function peak_flag.
-
-    Args:
-        Slope (2D numpy array): the input 2-D array, here issued from a slope raster where the local maximal values have been replaced by 0.
-        Search_space (2D numpy array): the search space array.
-        Peaks (2D numpy array): A 2-D array containing elements with a value of 1. These elements have the same indices as the elements with a value of 0 in Slope.
-        Order (int): the value given to the identified elements. it should be superior by 1 to the value of Order in the function peak_flag.
-
-    Returns:
-        Ridges (2D numpy array): a 2-D array where the identified elements have a value of Order. This array is modified from the Peaks array and therefore also contains elements of a value equal to the Order in the function peak_flag.
-        Slope_copy (2D numpy array): a copy of the input array where the value of the selected elements has been set to 0.
-
-    Author: GCHG
-    """
-
-    print ' ... Starting ridges ...'
-    Slope_copy = np.copy(Slope) # the copy of the initial data array
-    Search = np.where(Search_space == 1) # the searched locations
-    Search_peaks = np.where(Peaks == Order-1) # the searched locations where the peaks are
-    Ridges = np.copy(Peaks)
-
-    # Define Kernels
-    for i in range(len(Search_peaks[0])):
-        x=Search_peaks[0][i]; y=Search_peaks[1][i] # coordinates of the kernel's centre
-        Kernel_slope = kernel (Slope, 3, x, y)
-        Kernel_slope_copy = kernel (Slope_copy, 3, x, y)
-        Kernel_ridges = kernel (Ridges, 3, x, y)
-        Kernel_search = kernel (Search_space, 3, x, y)
-
-        # 1/ If there are no other peaks, we have two ridge starters
-        if np.count_nonzero(Kernel_ridges) == 1:
-            Ridge_starter1 = np.where (Kernel_slope_copy == np.amax (Kernel_slope_copy))
-            X1=Ridge_starter1[0][0]; Y1=Ridge_starter1[1][0]
-
-            # if it is within the initial search space
-            if Search_space[x+X1-1, y+Y1-1] != 0:
-                Ridges[x+X1-1, y+Y1-1] = Order
-                Slope_copy[x+X1-1, y+Y1-1] = 0
-
-                # Look for a second ridge starter
-                Ridge_starter2 = np.where (Kernel_slope_copy == np.amax (Kernel_slope_copy))
-                X2=Ridge_starter2[0][0]; Y2=Ridge_starter2[1][0]
-                Distance = np.sqrt((X2-X1)**2+(Y2-Y1)**2)
-
-                # if it is within the initial search space AND not next to the first ridge starter
-                if Search_space[x+X2-1, y+Y2-1] != 0 and Distance > np.sqrt(2):
-                    Ridges[x+X2-1, y+Y2-1] = Order
-                    Slope_copy[x+X2-1, y+Y2-1] = 0
-
-                # Otherwise, look for second ridge starter elsewhere in the kernel
-                elif Search_space[x+X2-1, y+Y2-1] != 0 and Distance <= np.sqrt(2):
-                    for j in np.arange(0,9,1):
-                        Kernel_slope_copy[X2, Y2] = 0
-
-                        Ridge_starter2 = np.where (Kernel_slope_copy == np.amax (Kernel_slope_copy))
-                        X2=Ridge_starter2[0][0]; Y2=Ridge_starter2[1][0]
-                        Distance = np.sqrt((X2-X1)**2+(Y2-Y1)**2)
-
-                        if Search_space[x+X2-1, y+Y2-1] != 0 and Distance > np.sqrt(2):
-                            Ridges[x+X2-1, y+Y2-1] = Order
-                            Slope_copy[x+X2-1, y+Y2-1] = 0
-                            break
-
-
-        # 2/ If there are two peaks, we have one ridge starter
-        elif np.count_nonzero(Kernel_ridges) == 2:
-            Ridge_starter1 = np.where (Kernel_slope_copy == np.amax (Kernel_slope_copy))
-            X1=Ridge_starter1[0][0]; Y1=Ridge_starter1[1][0]
-
-            # if it is within the initial search space
-            if Search_space[x+X1-1, y+Y1-1] != 0:
-                Ridges[x+X1-1, y+Y1-1] = Order
-                Slope_copy[x+X1-1, y+Y1-1] = 0
-
-    return Ridges, Slope_copy
-
-
-
-
-
-
-#-----------------------------------------------------------------------------------------------------
-def Continue_ridge (Slope, Search_space, Peaks, Order):
-    """
-    This function is the third and final stage of a routing process used to identify lines of maximum slopes.
-    IMPORTANT: this function is meant to be run several times! It requires the incrementation of the Order value with each iteration.
-    This function identifies multiple elements in an array (Slope), within a predefined search space (Search_space) and within the neighbourhood of the local maxima identified in a second input array (Peaks).  The identified elements are given a value of Order. To make this function work, the input array Slope should be the output array Slope_copy of the function initiate_ridge.
-
-    Args:
-        Slope (2D numpy array): the input 2-D array, here issued from a slope raster where the elements selected in the initiate_ridge function have been replaced by 0.
-        Search_space (2D numpy array): the search space array.
-        Peaks (2D numpy array): A 2-D array containing elements with a value of 1. These elements have the same indices as the elements with a value of 0 in Slope.
-        Order (int): the value given to the identified elements. On the first iteration it should be superior by 1 to the value of Order in the function initiate_ridge. the value of Order then needs to be incremented with every iteration.
-
-    Returns:
-        Ridges (2D numpy array): a 2-D array where the identified elements have a value of Order. This array is modified from the Peaks array and therefore also contains elements of a value equal to the Order in the functions peak_flag and initiate_ridge.
-        Slope_copy (2D numpy array): a copy of the input array where the value of the selected elements has been set to 0.
-
-    Author: GCHG
-    """
-
-    print ' ... Prolongating ridges ...'
-    Slope_copy = np.copy(Slope) # the copy of the initial slope array
-    Search = np.where(Search_space == 1) # the searched locations
-    Search_peaks = np.where(Peaks == Order-1) # the searched locations where the peaks are
-    Ridges = np.copy(Peaks)
-
-    # Define Kernels
-    for i in range(len(Search_peaks[0])):
-        x=Search_peaks[0][i]; y=Search_peaks[1][i] # coordinates of the kernel's centre
-
-        Kernel_slope = kernel (Slope, 3, x, y)
-        Kernel_slope_copy = kernel (Slope_copy, 3, x, y)
-        Kernel_ridges = kernel (Ridges, 3, x, y)
-        Kernel_search = kernel (Search_space, 3, x, y)
-
-        # Count the number of nonzero points in the kernel of the ridge array
-        Ridge_count = np.count_nonzero(Kernel_ridges)
-
-        # If there are only the 2 previous ridge points, draw a third point that is far enough from the previous point
-        if Ridge_count == 2:
-            New_point = np.where (Kernel_slope_copy == np.amax (Kernel_slope_copy))
-            X=New_point[0][0]; Y=New_point[1][0]
-            Grandad_point = np.where (Kernel_ridges == Order-2)
-            Xgd=Grandad_point[0][0]; Ygd=Grandad_point[1][0]
-            Distance = np.sqrt((X-Xgd)**2+(Y-Ygd)**2)
-
-            if Search_space[x+X-1, y+Y-1] != 0 and Distance > np.sqrt(2):
-                Ridges[x+X-1, y+Y-1] = Order
-                Slope_copy[x+X-1, y+Y-1] = 0
-
-            elif Search_space[x+X-1, y+Y-1] != 0 and Distance <= np.sqrt(2):
-                for j in np.arange(0,9,1):
-                    Kernel_slope_copy[X, Y] = 0
-
-                    New_point = np.where (Kernel_slope_copy == np.amax (Kernel_slope_copy))
-                    X=New_point[0][0]; Y=New_point[1][0]
-                    Distance = np.sqrt((X-Xgd)**2+(Y-Ygd)**2)
-
-                    if Search_space[x+X-1, y+Y-1] != 0 and Distance > np.sqrt(2):
-                        Ridges[x+X-1, y+Y-1] = Order
-                        Slope_copy[x+X-1, y+Y-1] = 0
-                        break
-
-    return Ridges, Slope_copy
-
-
-
-
-#-----------------------------------------------------------------------------------------------------
-def Clean_ridges (Peaks, DEM, Nodata_value, opt):
-    """
-    This function eliminates some of the ridges (Peaks) identified by the trio of functions (peak_flag, initiate_ridge and continue_ridge). The elimination process depends on local relief, which uses a DEM (DEM) and a threshold value (opt). It is set to ignore elements with a value of  Nodata_value.
-
-    Args:
-        Peaks (2D numpy array): the input 2-D arraym which is the output of the ridge identification process.
-        DEM (2D numpy array): the DEM array used as a base for the elimination of unnecessary ridges.
-        Nodata_value (float): The value for ignored elements.
-        opt (float): The value of the threshold to eliminate unnecessary ridges.
-
-    Returns:
-        Peaks (2D numpy array): a 2-D array much like the input Peaks array, but the unnecessary elemets have been reset to 0.
-
-    Author: GCHG
-    """
-
-    print "Cleaning up ridges ..."
-    DEM_copy = np.copy(DEM)
-    DEM_copy[DEM_copy==Nodata_value] = 0
-    Search_ridge = np.where (Peaks != 0)
-
-    Cutoff = np.percentile(DEM_copy,75)
-    Threshold = np.amax(DEM_copy[DEM_copy<Cutoff])
-    DEM_copy[DEM_copy>Threshold]=Threshold
-
-    for i in range(len(Search_ridge[0])):
-        x=Search_ridge[0][i]; y=Search_ridge[1][i] # coordinates of the kernel's centre
-        Kernel_DEM = kernel (DEM_copy, 9, x, y)
-        Kernel_DEM[Kernel_DEM==Nodata_value]=0
-
-        if np.amax(Kernel_DEM)/Threshold < opt:
-            Peaks[x,y] = 0
-
-    Search_ridge = np.where (Peaks != 0)
-    for i in range(len(Search_ridge[0])):
-        x=Search_ridge[0][i]; y=Search_ridge[1][i] # coordinates of the kernel's centre
-        Kernel_ridges = kernel (Peaks, 9, x, y)
-        # If there aren't at least 8 ridge points in the neighbourhood of 10 by 10
-        if np.count_nonzero(Kernel_ridges) < 8:
-            Peaks[x,y] = 0
-
-    return Peaks
-
-
-
-
-#-----------------------------------------------------------------------------------------------------
-def Fill_marsh (DEM, Peaks, Nodata_value, opt):
-    """
-    This function builds a marsh platform array by using the Peaks array as a starting point. It uses the DEM array to establish conditions on the elements to select. the opt parameter sets a threshold value to eliminate superfluous elements. It is set to ignore elements with a value of Nodata_value.
-
-    Args:
-        DEM (2D numpy array): the DEM array.
-        Peaks (2D numpy array): the 2-D array of ridge elements, which is the output of the ridge identification and cleaning process.
-        Nodata_value (float): The value for ignored elements.
-        opt (float): The value of the threshold to eliminate unnecessary elements.
-
-    Returns:
-        Marsh (2D numpy array): a 2-D array where the marsh platform elements are identified by strictly positive values. Other elements have a valuof 0 or Nodata_value.
-
-    Author: GCHG
-    """
-
-    print "Initiate platform ..."
-    DEM_copy = np.copy(DEM)
-    Marsh = np.zeros((len(DEM), len(DEM[0,:])), dtype = np.float)
-
-    Counter = 1
-    Search_ridges = np.where (Peaks > 0)
-    for i in range(len(Search_ridges[0])):
-        x=Search_ridges[0][i]; y=Search_ridges[1][i]
-        Kernel_ridges = kernel (Peaks, 3, x, y)
-        Kernel_DEM = kernel (DEM, 3, x, y)
-
-        Marsh_point = np.where (np.logical_and (Kernel_DEM >= Kernel_DEM[1,1], Kernel_ridges == 0))
-        for j in range(len(Marsh_point[0])):
-            X=Marsh_point[0][j]; Y=Marsh_point[1][j]
-            Marsh[x+X-1, y+Y-1] = Counter
-
-    Search_marsh_start = np.where (Marsh == 1)
-    for i in range(len(Search_marsh_start[0])):
-        x=Search_marsh_start[0][i]; y=Search_marsh_start[1][i]
-        Kernel_marsh = kernel (Marsh, 3, x, y)
-        Kernel_ridges = kernel (Peaks, 3, x, y)
-        if np.count_nonzero(Kernel_marsh) <=2:
-            Marsh[x,y] = 0
-
-    print ' ... Build platform ...'
-    while Counter < 100:
-        Counter = Counter+1
-        Search_marsh = np.where (Marsh == Counter-1)
-        for i in range(len(Search_marsh[0])):
-            x = Search_marsh[0][i]; y = Search_marsh[1][i]
-            Kernel_DEM = kernel (DEM, 3, x, y)
-            Kernel_DEM_copy = kernel (DEM_copy, 3, x, y)
-            Kernel_ridges = kernel (Peaks, 3, x, y)
-            Kernel_marsh = kernel (Marsh, 3, x, y)
-            Big_Kernel_DEM = kernel (DEM, 11, x, y)
-            Big_Kernel_DEM_copy = kernel (DEM_copy, 11, x, y)
-
-
-            Conditions = np.zeros((len(Kernel_DEM), len(Kernel_DEM[0,:])), dtype = np.float)
-            # 1: free space
-            Condition_1 = np.where (np.logical_and(Kernel_ridges == 0, Kernel_marsh == 0)); Conditions[Condition_1] = 1
-            # 2: not topped
-            Condition_2 = np.where (np.logical_and(Kernel_DEM_copy > np.amax(Big_Kernel_DEM_copy)-0.20, Conditions == 1)); Conditions[Condition_2] = 2
-
-
-            #This is a distance thing to make sure you don't cross the ridges agin
-            Here_be_ridges = np.where (Kernel_ridges != 0)
-            Here_be_parents = np.where (Kernel_marsh == Counter-1)
-
-            for j in range(len(Condition_2[0])):
-                X=Condition_2[0][j]; Y=Condition_2[1][j]
-                Distance_to_ridges = []
-                Distance_to_parents = []
-
-                for k in range(len(Here_be_ridges[0])):
-                    Xr=Here_be_ridges[0][k]; Yr=Here_be_ridges[1][k]
-                    Distance = np.sqrt((X-Xr)**2+(Y-Yr)**2)
-                    Distance_to_ridges.append(Distance)
-
-                for k in range(len(Here_be_parents[0])):
-                    Xp=Here_be_parents[0][k]; Yp=Here_be_parents[1][k]
-                    Distance = np.sqrt((X-Xp)**2+(Y-Yp)**2)
-                    Distance_to_parents.append(Distance)
-
-                if len(Distance_to_ridges)>0:
-                    if len(Distance_to_parents)>0:
-                        if min(Distance_to_ridges) > min(Distance_to_parents):
-                            Marsh[x+X-1, y+Y-1] = Counter
-                else:
-                    Marsh[x+X-1, y+Y-1] = Counter
-                    DEM_copy[x+X-1, y+Y-1] = 0
-
-
-    print ' ... defining the elimination of low platforms ...'
-    Platform = np.copy(Marsh)
-    Platform[Platform > 0] = DEM [Platform > 0]
-    Platform_bins, Platform_hist = Distribution(Platform,0)
-
-    #1. Find the highest and biggest local maximum of frequency distribution
-    # Initialize Index
-    Index = len(Platform_hist)-1
-    # Initiate Cutoff_Z value
-    Cutoff_Z = 0
-
-    for j in range(1,len(Platform_hist)-1):
-        if Platform_hist[j]>0.9*max(Platform_hist) and Platform_hist[j]>Platform_hist[j-1] and Platform_hist[j]>Platform_hist[j+1]:
-            Index  = j
-
-    #2. Now run a loop from there toward lower elevations.
-    Counter = 0
-    for j in range(Index,0,-1):
-        # See if you cross the mean value of frequency. Count for how many indices you are under.
-        if Platform_hist[j] < np.mean(Platform_hist):
-            Counter = Counter + 1
-        # Reset the counter value if you go above average again
-        else:
-            Counter = 0
-
-        #If you stay long enough under (10 is arbitrary for now), initiate cutoff and stop the search
-        if Counter > opt:
-            Cutoff = j
-            Cutoff_Z = Platform_bins[Cutoff]
-            break
-
-    # If you stay under for more than 5, set a Cutoff_Z value but keep searching
-    if Counter > opt/2:
-        Cutoff = j
-        Cutoff_Z = Platform_bins[Cutoff]
-
-    Marsh[Platform<Cutoff_Z] = 0
-
-
-    print " ... Fill high areas left blank ..."
-    Search_marsh_condition = np.zeros((len(DEM), len(DEM[0,:])), dtype = np.float)
-    Search_marsh = np.where (DEM >= Platform_bins[Index])
-    Search_marsh_condition [Search_marsh] = 1
-    Search_marsh_2 = np.where (np.logical_and(Marsh == 0, Search_marsh_condition == 1))
-    Marsh[Search_marsh_2] = 3
-
-    print ' ... Fill the interior of pools ...'
-    for Iteration in np.arange(0,10,1):
-        Counter = 100
-        while Counter > 2:
-            print Counter
-            Counter = Counter-1
-            Search_marsh = np.where (Marsh == Counter+1)
-            Non_filled = 0
-            for i in range(len(Search_marsh[0])):
-                x = Search_marsh[0][i]; y = Search_marsh[1][i]
-                Kernel_DEM = kernel (DEM, 3, x, y)
-                Kernel_ridges = kernel (Peaks, 3, x, y)
-                Kernel_marsh = kernel (Marsh, 3, x, y)
-
-                if Non_filled <len(Search_marsh[0]):
-                    if np.count_nonzero(Kernel_marsh) > 6:
-                        Condition = np.where (np.logical_and(Kernel_marsh == 0, Kernel_ridges == 0))
-                        for j in range(len(Condition[0])):
-                            X=Condition[0][j]; Y=Condition[1][j]
-                            Marsh[x+X-1, y+Y-1] = Counter
-                    else:
-                        Non_filled = Non_filled + 1
-
-    # Reapply the cutoff because the straight line thing is ugly
-    Platform = np.copy(Marsh)
-    Platform[Platform > 0] = DEM [Platform > 0]
-    Marsh[Platform<Cutoff_Z] = 0
-
-
-
-    # We fill in the wee holes
-    Search_marsh = np.where (np.logical_and(Marsh == 0, Peaks == 0))
-    for i in range(len(Search_marsh[0])):
-        x = Search_marsh[0][i]; y = Search_marsh[1][i]
-        Kernel_marsh = kernel (Marsh, 3, x, y)
-        if np.count_nonzero(Kernel_marsh) == 8:
-            Marsh[x,y] = 105
-
-
-
-    print ' ... Adding the ridges'
-    # We get rid of scarps that do not have a marsh next to them
-    Search_false_scarp = np.where (Peaks > 0)
-    for i in range(len(Search_false_scarp[0])):
-        x = Search_false_scarp[0][i]; y = Search_false_scarp[1][i]
-        Kernel_marsh = kernel (Marsh, 3, x, y)
-        if np.count_nonzero (Kernel_marsh) == 0:
-            Peaks[x, y] = 0
-
-    # We get rid of the sticky-outy bits
-    Search_ridge = np.where (Peaks > 0)
-    for i in range(len(Search_ridge[0])):
-        x=Search_ridge[0][i]; y=Search_ridge[1][i]
-        Kernel_ridges = kernel (Peaks, 9, x, y)
-        if np.count_nonzero(Kernel_ridges) < 8:
-            Peaks[x,y] = 0
-
-    # We put the scarps in the platform
-    Search_side = np.where (Peaks > 0)
-    Marsh[Search_side] = 110
-
-    print " ... eliminate patches of empty elements ..."
-    Search_marsh_condition = np.zeros((len(DEM), len(DEM[0,:])), dtype = np.float)
-    Search_marsh = np.where (DEM >= Platform_bins[Index])
-    Search_marsh_condition [Search_marsh] = 1
-    Search_marsh_2 = np.where (np.logical_and(Marsh == 0, Search_marsh_condition == 1))
-    Marsh[Search_marsh_2] = 3
-
-    print ' ... Fill the interior of pools ...'
-    for Iteration in np.arange(0,10,1):
-        Counter = 110
-        while Counter > 2:
-            Counter = Counter-1
-            Search_marsh = np.where (Marsh == Counter+1)
-            Non_filled = 0
-            for i in range(len(Search_marsh[0])):
-                x = Search_marsh[0][i]; y = Search_marsh[1][i]
-                Kernel_DEM = kernel (DEM, 3, x, y)
-                Kernel_ridges = kernel (Peaks, 3, x, y)
-                Kernel_marsh = kernel (Marsh, 3, x, y)
-
-                if Non_filled <len(Search_marsh[0]):
-                    if np.count_nonzero(Kernel_marsh) > 6:
-                        Condition = np.where (np.logical_and(Kernel_marsh == 0, Kernel_ridges == 0))
-                        for j in range(len(Condition[0])):
-                            X=Condition[0][j]; Y=Condition[1][j]
-                            Marsh[x+X-1, y+Y-1] = Counter
-                    else:
-                        Non_filled = Non_filled + 1
-
-    print ' ... defining the elimination of low platforms ...'
-    Platform = np.copy(Marsh)
-    Platform[Platform > 0] = DEM [Platform > 0]
-    Marsh[Platform<Cutoff_Z] = 0
-
-    Marsh[DEM == Nodata_value] = Nodata_value
-
-    return Marsh
-
 
 
 
